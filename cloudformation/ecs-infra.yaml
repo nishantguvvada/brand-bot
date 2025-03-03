@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  SecurityGroupId:
+    Type: String
+    Default: sg-0e38df3f5cb361979
+    Description: ICE Security Group with VPN access.
+
+
+  VpcId:
+    Type: String
+    Default: vpc-3b91c843
+    Description: >-
+      Select a VPC that allows instances to access the Internet. Select same VPC
+      in which LoadBalancer was created.
+  SubnetPubA:
+    Type: String
+    Default: subnet-bf9ba694
+    Description: >-
+      Select at two subnets in your selected VPC. Select same Subnets in which
+      LoadBalancer was created.
+  SubnetPubB:
+    Type: String
+    Default: subnet-d014918d
+    Description: >-
+      Select at two subnets in your selected VPC. Select same Subnets in which
+      LoadBalancer was created.
+  SubnetPriA:
+    Type: String
+    Default: subnet-d68b21ae
+    Description: >-
+      Select at two subnets in your selected VPC. Select same Subnets in which
+      LoadBalancer was created.
+  SubnetPriB:
+    Type: String
+    Default: subnet-e27ca8a8
+    Description: >-
+      Select at two subnets in your selected VPC. Select same Subnets in which
+      LoadBalancer was created.
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Number of instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: 1
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+
+  BackendSServiceName:
+    Type: String
+    Default: Backendservice
+    Description: This will be used to create service for ECS cluster - applayer/ciam-node.
+
+  FrontendECSServiceName:
+    Type: String
+    Default: Frontendservice
+    Description: This will be used to create service for ECS cluster - applayer/ciam-node.
+
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: 'For Container Port'
+
+  IAMRole:
+    Type: String
+    Default: arn:aws:iam::430957151316:role/brand-role
+
+  Region:
+    Type: 'String'
+    Default: us-west-2
+    Description: 'AWS region'
+
+Resources:
+  AppCloudwatchLogsGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: BRANDECSLogGroup
+      # !Join
+      #   - /
+      #   - - !Ref ECSCluster
+      # RetentionInDays: 14
+
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    DependsOn:
+      - AppCloudwatchLogsGroup
+    Properties:
+      ClusterName: BrandCluster
+      ServiceConnectDefaults:
+          Namespace: brandcluster
+      CapacityProviders:
+        - FARGATE
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # TODO: Create Redis Cluster
+
+  UiTd:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      Family: UI-Container
+      ContainerDefinitions:
+        - Name: UI-Container
+          Image: "430957151316.dkr.ecr.us-west-2.amazonaws.com/frontend:v1.0.4"
+          Environment:
+            - Name: "FASTAPI_URL"
+              Value: "backend-8080:8080"
+          Essential: true
+          PortMappings:
+            - HostPort: 3000
+              Protocol: tcp
+              ContainerPort: 3000
+              AppProtocol: http
+
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-create-group: true
+              awslogs-group: !Ref AppCloudwatchLogsGroup
+              awslogs-region: !Ref Region
+              awslogs-stream-prefix: !Ref FrontendECSServiceName
+      NetworkMode: awsvpc
+      Memory: "1024"
+      Cpu: "512"
+      TaskRoleArn: !Ref IAMRole
+      ExecutionRoleArn: !Ref IAMRole
+     
+  BackendTd:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      Family: Backend-Container
+      ContainerDefinitions:
+        - Name: Backend-Container
+          Image: "430957151316.dkr.ecr.us-west-2.amazonaws.com/backend:v1.0.1"
+          Environment:
+
+            - Name: "REGION"
+              Value: !Ref Region
+          
+          Essential: 'true'
+          PortMappings:
+            - HostPort: 8080
+              Name: backend-8080
+              Protocol: tcp
+              ContainerPort: 8080
+              AppProtocol: http
+
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-create-group: true
+              awslogs-group: !Ref AppCloudwatchLogsGroup
+            
+              awslogs-region: !Ref Region
+              awslogs-stream-prefix: !Ref BackendSServiceName
+      NetworkMode: awsvpc
+      Memory: '20480'
+      EphemeralStorage:
+          SizeInGiB: 40
+      Cpu: '8192'
+      TaskRoleArn: !Ref IAMRole
+      ExecutionRoleArn: !Ref IAMRole
+  
+  UiService:
+    Type: 'AWS::ECS::Service'
+    DependsOn:
+      - UiTd
+      - BackendService
+    Properties:
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: brandcluster
+      ServiceName: !Ref FrontendECSServiceName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCapacity
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      TaskDefinition: !Ref UiTd
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+           - !Ref SecurityGroupId
+          Subnets:
+           - !Ref SubnetPubA
+           - !Ref SubnetPubB
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: 'UI-Container'
+          ContainerPort: 3000
+          TargetGroupArn: !Ref TargetGroup
+    
+      PropagateTags: SERVICE
+
+
+  BackendService:
+    Type: 'AWS::ECS::Service'
+    DependsOn:
+      - BackendTd
+      - BrandALB
+    Properties:
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: brandcluster
+        Services:
+          - ClientAliases:
+                - DnsName: backend-8080
+                  Port: 8080
+            PortName: backend-8080
+            Timeout:
+                IdleTimeoutSeconds: 300
+                PerRequestTimeoutSeconds: 300
+      ServiceName: !Ref BackendSServiceName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCapacity
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      TaskDefinition: !Ref BackendTd
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+          - !Ref SecurityGroupId
+          Subnets:
+          - !Ref SubnetPubA
+          - !Ref SubnetPubB
+          AssignPublicIp: ENABLED
+
+      PropagateTags: SERVICE
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 'brand-ui-tg'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+    
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref BrandALB
+      Port: 80
+      Protocol: HTTP
+
+  BrandALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroupId  # Allow inbound traffic from security group
+      Subnets:
+        - !Ref SubnetPubA
+        - !Ref SubnetPubB
+
